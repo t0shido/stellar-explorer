@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, DateTime, Float, Boolean, Text,
-    ForeignKey, Numeric, Index, UniqueConstraint
+    ForeignKey, Numeric, Index, UniqueConstraint, BigInteger
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -35,6 +35,17 @@ class Account(Base):
         Index('idx_accounts_risk_score', 'risk_score'),
         Index('idx_accounts_last_seen', 'last_seen'),
     )
+
+class IngestionState(Base):
+    """Durable ingestion checkpoints"""
+    __tablename__ = "ingestion_state"
+
+    stream_name = Column(String(255), primary_key=True)
+    last_paging_token = Column(Text, nullable=False)
+    last_ledger = Column(BigInteger)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    error_count = Column(Integer, default=0, nullable=False)
+    last_error = Column(Text)
 
 
 class Asset(Base):

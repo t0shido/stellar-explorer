@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.db.models import (
     Account, Asset, AccountBalance, Transaction, Operation,
-    CounterpartyEdge, WatchlistMember
+    CounterpartyEdge, WatchlistMember, IngestionState
 )
 from app.services.horizon_client import HorizonClient, AccountNotFoundError, HorizonClientError
 
@@ -108,31 +108,38 @@ class IngestionService:
         """
         logger.info(f"Starting transaction ingestion", extra={"limit": limit})
         
+        stream_name = "transactions_global"
         try:
-            # Fetch transactions from Horizon
-            response = self.horizon_client.fetch_transactions(limit=limit)
+            # Read or initialize checkpoint
+            state = self._get_ingestion_state(stream_name)
+            cursor = state.last_paging_token
+
+            # Fetch transactions from Horizon using durable cursor
+            response = self.horizon_client.fetch_transactions(
+                limit=limit,
+                cursor=cursor,
+                order="asc"
+            )
             transactions = response.get('_embedded', {}).get('records', [])
             
             transactions_created = 0
             operations_created = 0
+            last_token = None
+            last_ledger = None
             
             for tx_data in transactions:
-                # Check if transaction already exists
-                tx_hash = tx_data.get('hash')
-                existing_tx = self.db.query(Transaction).filter(
-                    Transaction.tx_hash == tx_hash
-                ).first()
-                
-                if existing_tx:
-                    logger.debug(f"Transaction already exists", extra={"tx_hash": tx_hash})
-                    continue
-                
-                # Ingest transaction and operations
-                tx_created, ops_created = self._ingest_transaction(tx_data)
+                last_token = tx_data.get('paging_token') or last_token
+                last_ledger = tx_data.get('ledger') or last_ledger
+
+                tx_created, ops_created = self._upsert_transaction_record(tx_data)
                 if tx_created:
                     transactions_created += 1
                 operations_created += ops_created
-            
+
+            # Update checkpoint if we processed anything
+            if last_token:
+                self._update_ingestion_state(stream_name, last_token, last_ledger)
+
             self.db.commit()
             
             logger.info(
@@ -150,6 +157,78 @@ class IngestionService:
             self.db.rollback()
             logger.error(
                 "Transaction ingestion failed",
+                extra={"limit": limit, "error": str(e)}
+            )
+            raise
+
+    def ingest_operations_stream(self, limit: int = 200) -> Tuple[int, int]:
+        """
+        Stream operations using durable cursor (operations-first ingestion).
+
+        Args:
+            limit: Number of operations to fetch (max 200)
+
+        Returns:
+            Tuple of (transactions_created, operations_created)
+        """
+        logger.info("Starting operations ingestion", extra={"limit": limit})
+
+        stream_name = "operations_global"
+        try:
+            state = self._get_ingestion_state(stream_name)
+            cursor = state.last_paging_token
+
+            response = self.horizon_client.fetch_operations(
+                limit=limit,
+                cursor=cursor,
+                order="asc"
+            )
+            operations = response.get('_embedded', {}).get('records', [])
+
+            transactions_created = 0
+            operations_created = 0
+            last_token = None
+            last_ledger = None
+
+            for op_data in operations:
+                op_id = op_data.get('id')
+                if not op_id:
+                    continue
+
+                last_token = op_data.get('paging_token') or last_token
+                last_ledger = op_data.get('ledger') or last_ledger
+
+                tx_hash = op_data.get('transaction_hash')
+                transaction, tx_created = self._ensure_transaction(tx_hash, op_data)
+                if tx_created:
+                    transactions_created += 1
+                if not transaction:
+                    continue
+
+                created = self._upsert_operation(transaction, op_data)
+                if created:
+                    operations_created += 1
+
+            if last_token:
+                self._update_ingestion_state(stream_name, last_token, last_ledger)
+
+            self.db.commit()
+
+            logger.info(
+                "Operations ingestion completed",
+                extra={
+                    "transactions_created": transactions_created,
+                    "operations_created": operations_created,
+                    "limit": limit
+                }
+            )
+
+            return transactions_created, operations_created
+
+        except Exception as e:
+            self.db.rollback()
+            logger.error(
+                "Operations ingestion failed",
                 extra={"limit": limit, "error": str(e)}
             )
             raise
@@ -416,65 +495,110 @@ class IngestionService:
         self.db.add(transaction)
         self.db.flush()  # Get ID
         
-        # Fetch and ingest operations
-        operations = self.horizon_client.fetch_transaction_operations(tx_hash)
-        operations_created = 0
-        
-        for op_data in operations:
-            if self._ingest_operation(transaction, op_data):
-                operations_created += 1
-        
+        # Operations are ingested via the operations stream (to avoid N+1).
         logger.debug(
             "Ingested transaction",
             extra={
                 "tx_hash": tx_hash,
-                "operations": operations_created,
+                "operations": 0,
                 "ledger": transaction.ledger
             }
         )
         
-        return True, operations_created
+        return True, 0
     
-    def _ingest_operation(self, transaction: Transaction, op_data: Dict[str, Any]) -> bool:
+    def _upsert_transaction_record(self, tx_data: Dict[str, Any]) -> Tuple[bool, int]:
         """
-        Ingest single operation
-        
-        Args:
-            transaction: Parent transaction
-            op_data: Operation data from Horizon
-            
-        Returns:
-            True if created, False if skipped
+        Upsert transaction from a transaction record (no per-tx operations fetch).
         """
+        tx_hash = tx_data.get('hash')
+        if not tx_hash:
+            return False, 0
+
+        source_address = tx_data.get('source_account')
+        source_account = self._get_or_create_account(source_address) if source_address else None
+
+        created_at_raw = tx_data.get('created_at')
+        created_at_dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00')) if created_at_raw else datetime.utcnow()
+
+        stmt = insert(Transaction).values(
+            tx_hash=tx_hash,
+            ledger=tx_data.get('ledger'),
+            created_at=created_at_dt,
+            source_account_id=source_account.id if source_account else None,
+            fee_charged=tx_data.get('fee_charged', 0),
+            operation_count=tx_data.get('operation_count', 0),
+            memo=tx_data.get('memo'),
+            successful=tx_data.get('successful', True)
+        ).on_conflict_do_nothing()
+
+        result = self.db.execute(stmt)
+        created = result.rowcount == 1 if hasattr(result, "rowcount") else False
+        return created, 0
+    
+    def _ensure_transaction(self, tx_hash: str, op_data: Dict[str, Any]) -> Tuple[Optional[Transaction], bool]:
+        """Ensure transaction exists; create from detail if missing."""
+        if not tx_hash:
+            return None, False
+
+        existing_tx = self.db.query(Transaction).filter(Transaction.tx_hash == tx_hash).first()
+        if existing_tx:
+            return existing_tx, False
+
+        try:
+            tx_detail = self.horizon_client.fetch_transaction_detail(tx_hash)
+        except Exception as e:
+            logger.error("Failed to fetch transaction detail", extra={"tx_hash": tx_hash, "error": str(e)})
+            return None, False
+
+        source_address = tx_detail.get('source_account')
+        source_account = self._get_or_create_account(source_address) if source_address else None
+
+        created_at = tx_detail.get('created_at')
+        created_at_dt = datetime.fromisoformat(created_at.replace('Z', '+00:00')) if created_at else datetime.utcnow()
+
+        stmt = insert(Transaction).values(
+            tx_hash=tx_hash,
+            ledger=tx_detail.get('ledger'),
+            created_at=created_at_dt,
+            source_account_id=source_account.id if source_account else None,
+            fee_charged=tx_detail.get('fee_charged', 0),
+            operation_count=tx_detail.get('operation_count', 0),
+            memo=tx_detail.get('memo'),
+            successful=tx_detail.get('successful', True),
+        ).on_conflict_do_nothing()
+
+        result = self.db.execute(stmt)
+        created = result.rowcount == 1 if hasattr(result, "rowcount") else False
+
+        tx = self.db.query(Transaction).filter(Transaction.tx_hash == tx_hash).first()
+        return tx, created
+
+    def _upsert_operation(self, transaction: Transaction, op_data: Dict[str, Any]) -> bool:
+        """Upsert a single operation (operations-first ingestion)."""
         op_id = op_data.get('id')
-        
-        # Check if operation exists (idempotency)
-        existing_op = self.db.query(Operation).filter(Operation.op_id == op_id).first()
-        if existing_op:
+        if not op_id:
             return False
-        
+
         op_type = op_data.get('type')
-        
-        # Extract account references
+
         from_account_id = None
         to_account_id = None
         asset_id = None
         amount = None
-        
-        # Handle different operation types
+
         if op_type in ['payment', 'path_payment_strict_send', 'path_payment_strict_receive']:
             from_address = op_data.get('from')
             to_address = op_data.get('to')
-            
+
             if from_address:
                 from_account = self._get_or_create_account(from_address)
                 from_account_id = from_account.id
-            
+
             if to_address:
                 to_account = self._get_or_create_account(to_address)
                 to_account_id = to_account.id
-            
-            # Get asset
+
             if op_data.get('asset_type') != 'native':
                 asset = self._get_or_create_asset(
                     op_data.get('asset_code'),
@@ -482,29 +606,30 @@ class IngestionService:
                     op_data.get('asset_type')
                 )
                 asset_id = asset.id
-            
+
             amount = Decimal(op_data.get('amount', '0'))
-            
-            # Update counterparty edge
+
             if from_account_id and to_account_id:
-                self._update_counterparty_edge(from_account_id, to_account_id, asset_id, amount)
-        
+                self._upsert_counterparty_edge(from_account_id, to_account_id, asset_id, amount)
+
         elif op_type == 'create_account':
             from_address = op_data.get('funder')
             to_address = op_data.get('account')
-            
+
             if from_address:
                 from_account = self._get_or_create_account(from_address)
                 from_account_id = from_account.id
-            
+
             if to_address:
                 to_account = self._get_or_create_account(to_address)
                 to_account_id = to_account.id
-            
+
             amount = Decimal(op_data.get('starting_balance', '0'))
-        
-        # Create operation
-        operation = Operation(
+
+        created_at_raw = op_data.get('created_at')
+        created_at_dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00')) if created_at_raw else datetime.utcnow()
+
+        stmt = insert(Operation).values(
             op_id=op_id,
             tx_id=transaction.id,
             type=op_type,
@@ -512,12 +637,41 @@ class IngestionService:
             to_account_id=to_account_id,
             asset_id=asset_id,
             amount=amount,
-            raw=op_data,  # Store complete operation data
-            created_at=datetime.fromisoformat(op_data.get('created_at').replace('Z', '+00:00'))
+            raw=op_data,
+            created_at=created_at_dt,
+        ).on_conflict_do_nothing()
+
+        result = self.db.execute(stmt)
+        return result.rowcount == 1 if hasattr(result, "rowcount") else False
+
+    def _upsert_counterparty_edge(
+        self,
+        from_account_id: int,
+        to_account_id: int,
+        asset_id: Optional[int],
+        amount: Decimal
+    ):
+        """Upsert counterparty edge accumulators."""
+        stmt = insert(CounterpartyEdge).values(
+            from_account_id=from_account_id,
+            to_account_id=to_account_id,
+            asset_id=asset_id,
+            tx_count=1,
+            total_amount=amount,
+            last_seen=datetime.utcnow(),
+        ).on_conflict_do_update(
+            index_elements=[
+                CounterpartyEdge.from_account_id,
+                CounterpartyEdge.to_account_id,
+                CounterpartyEdge.asset_id,
+            ],
+            set_=dict(
+                tx_count=CounterpartyEdge.tx_count + 1,
+                total_amount=CounterpartyEdge.total_amount + amount,
+                last_seen=datetime.utcnow(),
+            ),
         )
-        self.db.add(operation)
-        
-        return True
+        self.db.execute(stmt)
     
     def _get_or_create_account(self, address: str) -> Account:
         """Get existing account or create minimal record"""
@@ -588,7 +742,57 @@ class IngestionService:
                 last_seen=datetime.utcnow()
             )
             self.db.add(edge)
-    
+
+    def _get_ingestion_state(self, stream_name: str) -> IngestionState:
+        """Fetch or initialize ingestion state for a stream."""
+        state = (
+            self.db.query(IngestionState)
+            .filter(IngestionState.stream_name == stream_name)
+            .first()
+        )
+
+        if not state:
+            state = IngestionState(
+                stream_name=stream_name,
+                last_paging_token="now",
+                last_ledger=None,
+                error_count=0,
+            )
+            self.db.add(state)
+            self.db.flush()
+
+        return state
+
+    def _update_ingestion_state(
+        self,
+        stream_name: str,
+        last_paging_token: str,
+        last_ledger: Optional[int],
+        last_error: Optional[str] = None,
+    ):
+        """Upsert ingestion state for a stream."""
+        stmt = insert(IngestionState).values(
+            stream_name=stream_name,
+            last_paging_token=last_paging_token,
+            last_ledger=last_ledger,
+            updated_at=datetime.utcnow(),
+            error_count=0 if not last_error else 1,
+            last_error=last_error,
+        )
+
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[IngestionState.stream_name],
+            set_=dict(
+                last_paging_token=last_paging_token,
+                last_ledger=last_ledger,
+                updated_at=datetime.utcnow(),
+                error_count=IngestionState.error_count + 1 if last_error else 0,
+                last_error=last_error,
+            ),
+        )
+
+        self.db.execute(stmt)
+
     def close(self):
         """Close resources"""
         if self._owns_client:

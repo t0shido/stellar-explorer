@@ -2,6 +2,8 @@
 Stellar Horizon API Client with retry logic and error handling
 """
 import logging
+import time
+from collections import deque
 from typing import Optional, Dict, Any, List
 from stellar_sdk import Server, Account
 from stellar_sdk.exceptions import (
@@ -37,6 +39,8 @@ class HorizonClient:
     """
     Stellar Horizon API client with retry logic and structured logging
     """
+    MAX_REQUESTS_PER_SECOND = 5  # basic per-process throttle
+    _request_times = deque()
     
     def __init__(self, horizon_url: Optional[str] = None):
         """
@@ -82,6 +86,7 @@ class HorizonClient:
             AccountNotFoundError: If account doesn't exist
             HorizonClientError: For other API errors
         """
+        self._throttle()
         try:
             logger.info(f"Fetching account data", extra={"address": address})
             
@@ -146,6 +151,7 @@ class HorizonClient:
         Raises:
             HorizonClientError: For API errors
         """
+        self._throttle()
         try:
             logger.info(
                 "Fetching transactions",
@@ -173,6 +179,112 @@ class HorizonClient:
                 extra={"error": str(e), "error_type": type(e).__name__}
             )
             raise HorizonClientError(f"Failed to fetch transactions: {str(e)}")
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((
+            StellarConnectionError,
+            BadResponseError,
+            httpx.TimeoutException
+        )),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
+    def fetch_operations(
+        self,
+        limit: int = 200,
+        cursor: Optional[str] = None,
+        order: str = "asc"
+    ) -> Dict[str, Any]:
+        """
+        Fetch operations from Horizon
+
+        Args:
+            limit: Number of operations to fetch (max 200)
+            cursor: Pagination cursor
+            order: Sort order ('asc' or 'desc')
+
+        Returns:
+            Operations response with embedded records
+
+        Raises:
+            HorizonClientError: For API errors
+        """
+        self._throttle()
+        try:
+            logger.info(
+                "Fetching operations",
+                extra={"limit": limit, "cursor": cursor, "order": order}
+            )
+
+            builder = self.server.operations().limit(limit).order(desc=(order == "desc"))
+            if cursor:
+                builder = builder.cursor(cursor)
+
+            response = builder.call()
+
+            op_count = len(response.get('_embedded', {}).get('records', []))
+            logger.info(
+                "Successfully fetched operations",
+                extra={"count": op_count, "limit": limit}
+            )
+
+            return response
+
+        except Exception as e:
+            logger.error(
+                "Error fetching operations",
+                extra={"error": str(e), "error_type": type(e).__name__}
+            )
+            raise HorizonClientError(f"Failed to fetch operations: {str(e)}")
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((
+            StellarConnectionError,
+            BadResponseError,
+            httpx.TimeoutException
+        )),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
+    def fetch_transaction_detail(self, tx_hash: str) -> Dict[str, Any]:
+        """
+        Fetch single transaction details by hash.
+        """
+        self._throttle()
+        try:
+            logger.info("Fetching transaction detail", extra={"tx_hash": tx_hash})
+            response = self.server.transactions().transaction(tx_hash).call()
+            return response
+        except NotFoundError:
+            logger.warning("Transaction not found", extra={"tx_hash": tx_hash})
+            raise HorizonClientError(f"Transaction {tx_hash} not found")
+        except Exception as e:
+            logger.error(
+                "Error fetching transaction detail",
+                extra={"tx_hash": tx_hash, "error": str(e), "error_type": type(e).__name__}
+            )
+            raise HorizonClientError(f"Failed to fetch transaction {tx_hash}: {str(e)}")
+
+    def _throttle(self):
+        """
+        Simple per-process token bucket to cap request rate.
+        """
+        now = time.time()
+        window = 1.0
+        max_req = self.MAX_REQUESTS_PER_SECOND
+
+        dq = self._request_times
+        while dq and now - dq[0] > window:
+            dq.popleft()
+
+        if len(dq) >= max_req:
+            sleep_for = window - (now - dq[0]) + 0.01
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+
+        dq.append(time.time())
     
     @retry(
         stop=stop_after_attempt(3),
