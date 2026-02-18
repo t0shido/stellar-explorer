@@ -26,7 +26,7 @@ class Account(Base):
     last_seen = Column(DateTime(timezone=True), onupdate=func.now(), index=True)
     label = Column(String(255))
     risk_score = Column(Float, default=0.0, index=True)
-    meta_data = Column(JSONB, default={})
+    meta_data = Column(JSONB, default=dict)
 
 
 class Asset(Base):
@@ -37,7 +37,7 @@ class Asset(Base):
     asset_code = Column(String(12), nullable=False, index=True)
     asset_issuer = Column(String(56), index=True)
     asset_type = Column(String(20))
-    metadata = Column(JSONB, default={})
+    meta_data = Column(JSONB, default=dict)
 
 
 class AccountBalance(Base):
@@ -81,7 +81,7 @@ class Operation(Base):
     to_account_id = Column(Integer, ForeignKey('accounts.id', ondelete='SET NULL'), nullable=True, index=True)
     asset_id = Column(Integer, ForeignKey('assets.id', ondelete='SET NULL'), nullable=True, index=True)
     amount = Column(Numeric(20, 7))
-    raw = Column(JSONB, nullable=False, default={})
+    raw = Column(JSONB, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
@@ -127,7 +127,7 @@ class Flag(Base):
     flag_type = Column(String(100), nullable=False, index=True)
     severity = Column(String(20), nullable=False, index=True)
     reason = Column(Text, nullable=False)
-    evidence = Column(JSONB, default={})
+    evidence = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
@@ -141,6 +141,6 @@ class Alert(Base):
     asset_id = Column(Integer, ForeignKey('assets.id', ondelete='SET NULL'), nullable=True, index=True)
     alert_type = Column(String(100), nullable=False, index=True)
     severity = Column(String(20), nullable=False, index=True)
-    payload = Column(JSONB, nullable=False, default={})
+    payload = Column(JSONB, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True, index=True)

@@ -18,7 +18,7 @@ def get_transactions(skip: int = 0, limit: int = 100, db: Session = Depends(get_
 @router.get("/{tx_hash}", response_model=TransactionResponse)
 def get_transaction(tx_hash: str, db: Session = Depends(get_db)):
     """Get transaction by hash"""
-    transaction = db.query(Transaction).filter(Transaction.hash == tx_hash).first()
+    transaction = db.query(Transaction).filter(Transaction.tx_hash == tx_hash).first()
     if not transaction:
         raise HTTPException(status_code=404, detail="Transaction not found")
     return transaction

@@ -22,8 +22,8 @@ celery_app.conf.update(
 
 # Periodic tasks configuration
 celery_app.conf.beat_schedule = {
-    'sync-transactions-every-minute': {
-        'task': 'app.tasks.stellar_tasks.sync_recent_transactions',
+    'operations-stream-every-minute': {
+        'task': 'app.tasks.stellar_tasks.ingest_operations_stream',
         'schedule': 60.0,  # Every 60 seconds
     },
     'update-network-stats-every-5-minutes': {

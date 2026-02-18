@@ -4,12 +4,13 @@ from typing import Optional
 
 
 class TransactionBase(BaseModel):
-    hash: str
-    source_account: str
-    fee: int
+    tx_hash: str
+    ledger: int
+    source_account_id: Optional[int] = None
+    fee_charged: int
     operation_count: int
     successful: bool = True
-    ledger: int
+    memo: Optional[str] = None
 
 
 class TransactionCreate(TransactionBase):

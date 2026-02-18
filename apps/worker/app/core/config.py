@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     # Celery
     CELERY_BROKER_URL: str = "redis://redis:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://redis:6379/0"
+    API_BASE_URL: str = "http://api:8000/api/v1"
     
     # Stellar Network
     STELLAR_NETWORK: str = "testnet"

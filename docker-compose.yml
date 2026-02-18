@@ -70,6 +70,22 @@ services:
       postgres:
         condition: service_healthy
 
+  worker-beat:
+    build:
+      context: ./apps/worker
+      dockerfile: Dockerfile
+    container_name: stellar_worker_beat
+    command: celery -A app.celery_app beat --loglevel=info
+    volumes:
+      - ./apps/worker:/app
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
   web:
     build:
       context: ./apps/web

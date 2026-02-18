@@ -1,4 +1,5 @@
 from celery import Task
+import requests
 from stellar_sdk import Server
 from app.celery_app import celery_app
 from app.core.config import settings
@@ -32,6 +33,37 @@ def sync_recent_transactions(self):
         return {"status": "success", "count": tx_count}
     except Exception as e:
         logger.error(f"Error syncing transactions: {e}")
+        raise
+
+
+@celery_app.task(base=StellarTask, bind=True)
+def ingest_operations_stream(self, limit: int = 200):
+    """
+    Trigger operations-first ingestion via API.
+    """
+    try:
+        url = f"{settings.API_BASE_URL}/ingest/operations/stream"
+        logger.info("Starting operations stream ingestion", extra={"url": url, "limit": limit})
+
+        response = requests.post(
+            url,
+            params={"limit": limit},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        logger.info(
+            "Operations stream ingestion completed",
+            extra={
+                "transactions_created": data.get("transactions_created"),
+                "operations_created": data.get("operations_created"),
+                "limit": data.get("limit"),
+            },
+        )
+        return data
+    except Exception as e:
+        logger.error("Error ingesting operations stream", extra={"error": str(e)})
         raise
 
 

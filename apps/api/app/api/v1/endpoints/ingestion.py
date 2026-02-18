@@ -156,13 +156,18 @@ def refresh_watchlist_accounts_async(
     Returns:
         Acknowledgment that task was queued
     """
+    from app.db.database import SessionLocal
+
     def refresh_task():
+        task_db = SessionLocal()
         try:
-            with IngestionService(db) as service:
+            with IngestionService(task_db) as service:
                 summary = service.ingest_watchlist_accounts()
-                logger.info(f"Background watchlist refresh completed", extra=summary)
+                logger.info("Background watchlist refresh completed", extra=summary)
         except Exception as e:
-            logger.error(f"Background watchlist refresh failed: {str(e)}")
+            logger.error("Background watchlist refresh failed", extra={"error": str(e)})
+        finally:
+            task_db.close()
     
     background_tasks.add_task(refresh_task)
     
@@ -170,3 +175,32 @@ def refresh_watchlist_accounts_async(
         "success": True,
         "message": "Watchlist refresh queued for background processing"
     }
+
+
+@router.post("/operations/stream", response_model=Dict[str, Any])
+def ingest_operations_stream(
+    limit: int = 200,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Ingest operations using durable cursor (operations-first ingestion)
+    """
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="Limit must be between 1 and 200")
+
+    try:
+        with IngestionService(db) as service:
+            tx_created, ops_created = service.ingest_operations_stream(limit=limit)
+
+            return {
+                "success": True,
+                "transactions_created": tx_created,
+                "operations_created": ops_created,
+                "limit": limit
+            }
+    except HorizonClientError as e:
+        logger.error("Horizon API error during operations ingestion", extra={"error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Horizon API error: {str(e)}")
+    except Exception as e:
+        logger.error("Unexpected error ingesting operations", extra={"error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
