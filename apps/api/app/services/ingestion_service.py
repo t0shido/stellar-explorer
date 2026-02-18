@@ -246,8 +246,8 @@ class IngestionService:
         if account:
             # Update existing account
             account.last_seen = datetime.utcnow()
-            account.metadata = {
-                **account.metadata,
+            account.meta_data = {
+                **(account.meta_data or {}),
                 "sequence": account_data.get('sequence'),
                 "subentry_count": account_data.get('subentry_count'),
                 "num_sponsoring": account_data.get('num_sponsoring', 0),
@@ -267,7 +267,7 @@ class IngestionService:
                 first_seen=datetime.utcnow(),
                 last_seen=datetime.utcnow(),
                 risk_score=0.0,
-                metadata={
+                meta_data={
                     "sequence": account_data.get('sequence'),
                     "subentry_count": account_data.get('subentry_count'),
                     "num_sponsoring": account_data.get('num_sponsoring', 0),
@@ -319,7 +319,7 @@ class IngestionService:
             asset_code=asset_code,
             asset_issuer=asset_issuer,
             asset_type=asset_type,
-            metadata={
+            meta_data={
                 "raw_data_snippet": {
                     "asset_code": asset_code,
                     "asset_issuer": asset_issuer,
@@ -400,15 +400,7 @@ class IngestionService:
         ).first()
         
         if not source_account:
-            source_account = Account(
-                address=source_address,
-                first_seen=datetime.utcnow(),
-                last_seen=datetime.utcnow(),
-                risk_score=0.0,
-                metadata={"discovered_via": "transaction"}
-            )
-            self.db.add(source_account)
-            self.db.flush()
+            source_account = self._upsert_account(source_address, tx_data)
         
         # Create transaction
         transaction = Transaction(
@@ -537,7 +529,7 @@ class IngestionService:
                 first_seen=datetime.utcnow(),
                 last_seen=datetime.utcnow(),
                 risk_score=0.0,
-                metadata={"discovered_via": "operation"}
+                meta_data={"discovered_via": "operation"}
             )
             self.db.add(account)
             self.db.flush()
@@ -561,7 +553,7 @@ class IngestionService:
                 asset_code=asset_code,
                 asset_issuer=asset_issuer,
                 asset_type=asset_type,
-                metadata={"discovered_via": "operation"}
+                meta_data={"discovered_via": "operation"}
             )
             self.db.add(asset)
             self.db.flush()

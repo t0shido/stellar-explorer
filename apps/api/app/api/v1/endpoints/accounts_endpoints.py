@@ -95,7 +95,7 @@ def get_account(
         risk_score=account.risk_score,
         first_seen=account.first_seen,
         last_seen=account.last_seen,
-        metadata=account.metadata,
+        metadata=account.meta_data,
         balances=balance_responses
     )
 

@@ -26,7 +26,7 @@ class Account(Base):
     last_seen = Column(DateTime(timezone=True), onupdate=func.now(), index=True)
     label = Column(String(255))
     risk_score = Column(Float, default=0.0, index=True)
-    metadata = Column(JSONB, default={})
+    meta_data = Column(JSONB, default={})
 
 
 class Asset(Base):
