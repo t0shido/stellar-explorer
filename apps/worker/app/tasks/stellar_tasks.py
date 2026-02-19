@@ -20,19 +20,33 @@ class StellarTask(Task):
 
 
 @celery_app.task(base=StellarTask, bind=True)
-def sync_recent_transactions(self):
-    """Sync recent transactions from Stellar network"""
+def sync_recent_transactions(self, limit: int = 100):
+    """
+    Trigger transaction ingestion via API (kept for backward compatibility).
+    """
     try:
-        logger.info("Starting transaction sync...")
-        transactions = server.transactions().limit(100).order(desc=True).call()
-        
-        # Process transactions
-        tx_count = len(transactions.get("_embedded", {}).get("records", []))
-        logger.info(f"Synced {tx_count} transactions")
-        
-        return {"status": "success", "count": tx_count}
+        url = f"{settings.API_BASE_URL}/ingest/transactions/latest"
+        logger.info("Starting transaction ingestion via API", extra={"url": url, "limit": limit})
+
+        response = requests.post(
+            url,
+            params={"limit": limit},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        logger.info(
+            "Transaction ingestion completed",
+            extra={
+                "transactions_created": data.get("transactions_created"),
+                "operations_created": data.get("operations_created"),
+                "limit": data.get("limit"),
+            },
+        )
+        return data
     except Exception as e:
-        logger.error(f"Error syncing transactions: {e}")
+        logger.error("Error ingesting recent transactions", extra={"error": str(e)})
         raise
 
 
