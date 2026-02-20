@@ -50,6 +50,19 @@ class AccountActivityResponse(BaseModel):
         from_attributes = True
 
 
+class AccountSummaryResponse(BaseModel):
+    """Summary account response for list endpoints"""
+    id: int
+    address: str = Field(..., description="Stellar account address")
+    label: Optional[str] = Field(None, description="Account label")
+    risk_score: float = Field(..., description="Risk score (0-100)")
+    first_seen: datetime = Field(..., description="First seen timestamp")
+    last_seen: Optional[datetime] = Field(None, description="Last activity timestamp")
+    
+    class Config:
+        from_attributes = True
+
+
 class CounterpartyResponse(BaseModel):
     """Counterparty relationship response"""
     account_id: int

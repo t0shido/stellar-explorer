@@ -18,6 +18,7 @@ celery_app.conf.update(
     task_track_started=True,
     task_time_limit=30 * 60,  # 30 minutes
     task_soft_time_limit=25 * 60,  # 25 minutes
+    broker_connection_retry_on_startup=True,  # Silence deprecation warning
 )
 
 # Periodic tasks configuration

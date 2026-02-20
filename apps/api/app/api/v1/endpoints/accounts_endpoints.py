@@ -13,8 +13,10 @@ from app.schemas.account_schemas import (
     AccountDetailResponse,
     AccountBalanceResponse,
     AccountActivityResponse,
+    AccountSummaryResponse,
     CounterpartyResponse
 )
+from typing import List
 from app.schemas.responses import PaginatedResponse, PaginationMetadata
 from app.services.ingestion_service import IngestionService
 from app.services.horizon_client import AccountNotFoundError
@@ -23,6 +25,21 @@ from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.get("/accounts/", response_model=List[AccountSummaryResponse], tags=["accounts"])
+def list_accounts(
+    skip: int = Query(default=0, ge=0, description="Number of records to skip"),
+    limit: int = Query(default=100, ge=1, le=500, description="Number of records to return"),
+    db: Session = Depends(get_db)
+) -> List[AccountSummaryResponse]:
+    """
+    List all accounts
+    
+    Returns paginated list of accounts in the database.
+    """
+    accounts = db.query(Account).order_by(Account.first_seen.desc()).offset(skip).limit(limit).all()
+    return accounts
 
 
 @router.get("/accounts/{address}", response_model=AccountDetailResponse, tags=["accounts"])
