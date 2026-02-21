@@ -1,4 +1,4 @@
-# Minimal stack: postgres + api + web (no redis, no workers)
+# Minimal stack: postgres + api (GUI runs natively on host)
 
 services:
   postgres:
@@ -38,23 +38,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-
-  web:
-    build:
-      context: ./apps/web
-      dockerfile: Dockerfile
-    container_name: stellar_web
-    command: npm run dev
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./apps/web:/app
-      - /app/node_modules
-      - /app/.next
-    env_file:
-      - .env
-    depends_on:
-      - api
 
 volumes:
   postgres_data:
