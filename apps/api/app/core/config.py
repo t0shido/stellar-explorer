@@ -12,12 +12,12 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str
     
-    # Redis
-    REDIS_URL: str
+    # Redis (optional - only needed if using Celery workers)
+    REDIS_URL: Optional[str] = None
     
-    # Celery
-    CELERY_BROKER_URL: str
-    CELERY_RESULT_BACKEND: str
+    # Celery (optional - only needed if using background workers)
+    CELERY_BROKER_URL: Optional[str] = None
+    CELERY_RESULT_BACKEND: Optional[str] = None
     
     # Stellar
     STELLAR_NETWORK: str = "testnet"
